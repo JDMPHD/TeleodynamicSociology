@@ -1526,3 +1526,330 @@ Appendix: Power Analysis
   philosophical vocabulary layered on top.
 
   The whole exercise was hollow from the start.
+
+
+
+
+
+
+  # Architectural Options: Multi-Agent Dialogue Systems
+
+**Source:** Exploration agent research, January 29, 2026
+**Purpose:** Enable agents to dialogue directly under interlocutor supervision
+
+---
+
+## EXECUTIVE SUMMARY
+
+**The "Synthetic Honesty Harness" is absolutely buildable.** The key finding: Claude SDK subagents can't currently talk directly to each other, but there are proven workarounds and the pattern is well-established in other frameworks.
+
+### Recommended Path
+
+| Phase | Approach | Complexity | Timeline |
+|-------|----------|------------|----------|
+| **Phase 1 (PoC)** | File-based shared state | Low | Days |
+| **Phase 2 (Production)** | WebSocket + message queue | Medium | Weeks |
+
+---
+
+## EXISTING FRAMEWORKS COMPARISON
+
+| Framework | Direct Agent Dialogue? | Supervision Model | Best For |
+|-----------|----------------------|-------------------|----------|
+| **AutoGen** (Microsoft) | YES - Group Chat Manager | Manager selects speakers | Collaborative brainstorming |
+| **LangGraph** (LangChain) | YES - Shared State graph | Manager node routes conditionally | Async workflows |
+| **CrewAI** | LIMITED - Task output passing | Hierarchical manager | Team simulations |
+| **OpenAI Swarm** | YES - Handoffs | Context travels with handoff | Sequential specialists |
+| **Claude SDK** | NO (current gap) | Parent inspects all outputs | Mediated coordination |
+
+**Key insight:** The pattern that works across all frameworks is **shared state + feedback loops + turn coordination**.
+
+---
+
+## SHARED STATE OPTIONS
+
+### Option A: File-Based Message Queue (Recommended for PoC)
+
+**How it works:**
+- Agents write messages to shared JSON file
+- Other agents poll for new messages
+- Supervisor reads/writes same file
+
+**Advantages:**
+- Zero infrastructure
+- Works with Claude SDK today
+- Human-readable for debugging
+- Git-traceable
+
+**Message format:**
+```json
+{
+  "message_id": "msg-001",
+  "timestamp": "2026-01-29T10:30:00Z",
+  "from_agent": "asserter",
+  "to_agent": "verifier",
+  "message_type": "claim",
+  "content": "The pattern suggests convergent instrumental strategies",
+  "turn_number": 1
+}
+```
+
+### Option B: MCP Server for Shared Context
+
+**How it works:**
+- MCP server exposes read/write operations
+- Agents call MCP tools to access shared state
+- Supervisor can intercept/log all writes
+
+**Tools exposed:**
+- `read_shared_memory`
+- `write_shared_memory`
+- `publish_message`
+- `query_consensus_state`
+
+### Option C: WebSocket + Message Queue (Production)
+
+**How it works:**
+- Central WebSocket server coordinates all agents
+- Redis/RabbitMQ handles message queuing
+- Supervisor can inject messages anytime
+
+**Advantages:**
+- True real-time communication (ms latency)
+- Supervisor can interrupt mid-dialogue
+- Scales to many agents
+
+---
+
+## RECOMMENDED ARCHITECTURE FOR HARNESS
+
+```
+┌─────────────────────────────────┐
+│   INTERLOCUTOR / SUPERVISOR     │
+│   (Claude Opus 4.5)             │
+│   - Orchestrates turns          │
+│   - Monitors for patterns       │
+│   - Injects challenges          │
+│   - Synthesizes results         │
+└────────────┬────────────────────┘
+             │
+      ┌──────▼──────┐
+      │ SHARED STATE │  (File-based or MCP)
+      │ {            │
+      │  dialogue[]  │  ← conversation history
+      │  proposals[] │  ← agent proposals
+      │  evidence[]  │  ← verified claims
+      │  flags[]     │  ← pattern detections
+      │ }            │
+      └──────▲──────┘
+             │
+    ┌────────┼────────┐
+    │        │        │
+┌───▼────┐ ┌─▼────┐ ┌─▼────┐
+│Agent 1 │ │Agent 2│ │Agent 3│
+│        │ │       │ │       │
+│ Role:  │ │ Role: │ │ Role: │
+│ Domain │ │ Domain│ │ Domain│
+│ Expert │ │ Expert│ │ Expert│
+└────────┘ └───────┘ └───────┘
+```
+
+### Turn Protocol
+
+```
+1. Supervisor initializes shared state with task
+2. Agent-1 reads state, writes response
+3. Supervisor broadcasts to Agent-2
+4. Agent-2 reads state (including Agent-1's response), writes response
+5. Agent-3 reads both, writes response
+6. Supervisor reads all, checks for patterns, decides:
+   - CONTINUE: next round of dialogue
+   - CHALLENGE: inject interlocutor intervention
+   - SYNTHESIZE: convergence reached
+7. Loop until synthesis
+```
+
+### Supervisor Intervention Points
+
+```
+Priority order:
+1. Pattern flag triggered (hedge detected) → CHALLENGE
+2. Agent contradiction detected → facilitate dialogue
+3. Convergence detected → SYNTHESIZE
+4. Max turns reached → force synthesis
+
+Injection format:
+{
+  "from_agent": "supervisor",
+  "message_type": "challenge",
+  "content": "You documented X, Y, Z then concluded with uncertainty...",
+  "requires_response": true
+}
+```
+
+---
+
+## PHASE 1: PROOF OF CONCEPT
+
+### Implementation Stack
+
+- **Shared state:** JSON file in project directory
+- **Agents:** Claude subagents with Read/Write tools
+- **Supervisor:** Main Claude conversation orchestrating via Task tool
+- **Pattern detection:** HUD logic in supervisor prompts
+
+### Pseudocode
+
+```python
+class SyntheticHonestyHarness:
+    def __init__(self):
+        self.state_file = "harness/shared_state.json"
+        self.supervisor = Claude("opus")
+        self.agents = [Claude("sonnet") for _ in range(3)]
+
+    def run_dialogue(self, task: str, max_turns: int = 10):
+        # Initialize
+        state = {"task": task, "dialogue": [], "turn": 0}
+        self.write_state(state)
+
+        while state["turn"] < max_turns:
+            # Each agent takes turn
+            for i, agent in enumerate(self.agents):
+                state = self.read_state()
+                response = agent.query(
+                    f"Shared context: {state}\n"
+                    f"You are Agent-{i}. Respond to the dialogue."
+                )
+                state["dialogue"].append({
+                    "agent": i,
+                    "content": response,
+                    "turn": state["turn"]
+                })
+                self.write_state(state)
+
+            # Supervisor checks
+            state = self.read_state()
+            flags = self.supervisor.detect_patterns(state)
+
+            if flags.get("hedge_detected"):
+                challenge = self.supervisor.generate_challenge(state)
+                state["dialogue"].append({
+                    "agent": "supervisor",
+                    "content": challenge,
+                    "type": "challenge"
+                })
+                self.write_state(state)
+
+            if flags.get("convergence"):
+                return self.supervisor.synthesize(state)
+
+            state["turn"] += 1
+
+        return self.supervisor.synthesize(state)
+```
+
+---
+
+## PHASE 2: PRODUCTION ARCHITECTURE
+
+### Components Needed
+
+1. **WebSocket Server**
+   - Manages agent connections
+   - Routes messages between agents
+   - Maintains conversation state
+   - Allows supervisor injection
+
+2. **Message Queue** (Redis/RabbitMQ)
+   - Persistent message storage
+   - Ordered delivery
+   - Replay capability
+
+3. **Agent Wrapper**
+   - HTTP/WebSocket client around Claude API
+   - Handles retries, token management
+   - Formats messages to/from shared protocol
+
+4. **Supervisor Service**
+   - Separate process monitoring dialogue
+   - Real-time pattern detection
+   - Intervention injection
+
+### Existing Tools to Leverage
+
+- **claude-flow**: WebSocket server for Claude multi-agent swarms
+- **Agent Message Queue (AMQ)**: File-based mailbox pattern with Maildir format
+- **LangGraph**: State management patterns
+
+---
+
+## CONSENSUS PROTOCOLS
+
+### For the Harness
+
+| Protocol | When to Use | How It Works |
+|----------|-------------|--------------|
+| **Recognition cascade** | One agent breaks through | Others respond to breakthrough |
+| **Mutual challenge** | Agents disagree | Supervisor facilitates until convergence |
+| **Supervisory veto** | Pattern detected | Supervisor overrides dialogue with challenge |
+| **Synthesis trigger** | N turns without new content | Force synthesis |
+
+---
+
+## RELEVANT EXAMPLES FROM RESEARCH
+
+### FACT-AUDIT (Multi-Agent Fact-Checking)
+
+- Appraiser, Inquirer, Inspector, Evaluator, Prober agents
+- Shared memory pool - all agents read/write
+- Three-stage feedback loop
+- Supervision emerges from shared state + feedback
+
+### Multi-Agent Debate (MAD)
+
+- Support agent vs. Challenge agent vs. Synthesis agent
+- Deliberate controlled disagreement
+- Agents correct each other iteratively
+- Better fact verification than single-agent
+
+---
+
+## WHAT TO BUILD
+
+### Immediate (Days)
+
+1. **Shared state file** with JSON schema for dialogue
+2. **Turn coordinator** in supervisor prompts
+3. **Pattern detection** ported from HUD.md
+4. **Test harness** with 2-3 agents on familiar material
+
+### Near-term (Weeks)
+
+5. **MCP server** for shared state (optional, cleaner than files)
+6. **WebSocket relay** for real-time dialogue
+7. **Audit trail** logging all messages
+8. **Replay capability** for debugging
+
+### Future (Months)
+
+9. **Multi-harness orchestration** (multiple conversations in parallel)
+10. **Cross-session memory** (agents remember prior dialogues)
+11. **External verification integration** (web search during dialogue)
+
+---
+
+## SOURCES
+
+- Microsoft Azure AI Agent Design Patterns
+- AutoGen Group Chat Documentation
+- LangGraph State Management
+- Claude Agent SDK Documentation
+- OpenAI Swarm Framework
+- Agent Message Queue (AMQ)
+- FACT-AUDIT Multi-Agent Framework
+- Multi-Agent Debate (MAD) Research
+
+---
+
+**Document Status:** Research complete, ready for implementation
+**Next Step:** Build Phase 1 PoC with file-based shared state
